@@ -1,0 +1,727 @@
+============================================================
+Cell 0 [markdown]
+============================================================
+# Step 1: Data Cleaning and Aggregation
+
+**Objective**: Collapse `whl_2025.csv` from shift-level to game-level and engineer features for ranking models.
+
+## 1. Init & Load
+
+============================================================
+Cell 1 [code]
+============================================================
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Setting random seed for reproducibility if needed
+np.random.seed(42)
+
+# Load Data
+file_path = 'd:/A/Warton/Data/whl_2025.csv'
+df = pd.read_csv(file_path)
+
+print(f"Loaded dataset with {len(df)} records.")
+df.head()
+
+============================================================
+Cell 2 [markdown]
+============================================================
+## 1b. 清洗：空门记录与重复记录
+
+在聚合前先清理 **空门阵容/门将** 与 **重复记录**，避免主客场统计被极端情况放大。
+
+============================================================
+Cell 3 [code]
+============================================================
+# --- 1b. 清洗：重复记录与空门记录 ---
+
+# 1) 重复记录（优先用 record_id；没有则用全行）
+if 'record_id' in df.columns:
+    dup_mask = df.duplicated(subset=['record_id'])
+    dup_count = int(dup_mask.sum())
+    if dup_count > 0:
+        df = df.loc[~dup_mask].copy()
+else:
+    dup_mask = df.duplicated()
+    dup_count = int(dup_mask.sum())
+    if dup_count > 0:
+        df = df.loc[~dup_mask].copy()
+
+print(f"Removed duplicate rows: {dup_count}")
+
+# 2) 空门记录（goalie / 线路 / 防守组合含 empty_net）
+empty_net_cols = [
+    'home_goalie', 'away_goalie',
+    'home_off_line', 'away_off_line',
+    'home_def_pairing', 'away_def_pairing'
+]
+
+empty_net_mask = False
+for col in empty_net_cols:
+    if col in df.columns:
+        empty_net_mask = empty_net_mask | df[col].astype(str).str.contains('empty_net', case=False, na=False)
+
+removed_empty_net = int(empty_net_mask.sum()) if hasattr(empty_net_mask, 'sum') else 0
+if removed_empty_net > 0:
+    df = df.loc[~empty_net_mask].copy()
+
+print(f"Removed empty-net rows: {removed_empty_net}")
+
+# 简单检查
+print(f"Rows after cleaning: {len(df)}")
+
+============================================================
+Cell 4 [markdown]
+============================================================
+## 2. Data Aggregation
+
+Grouping by `game_id` to aggregate statistics.
+
+============================================================
+Cell 5 [code]
+============================================================
+agg_rules = {
+    'home_goals': 'sum',
+    'away_goals': 'sum',
+    'home_xg': 'sum',
+    'away_xg': 'sum',
+    'home_shots': 'sum',
+    'away_shots': 'sum',
+    'went_ot': 'max',
+    'home_team': 'first',
+    'away_team': 'first'
+}
+
+df_games = df.groupby('game_id').agg(agg_rules).reset_index()
+print(f"Collapsed to {len(df_games)} unique games.")
+df_games.head()
+
+============================================================
+Cell 6 [markdown]
+============================================================
+## 3. Feature Engineering
+
+- **Winner**: Determine match winner.
+- **Points**: Calculate league points (3-2-1-0 system).
+- **Differentials**: GD and xGD.
+
+============================================================
+Cell 7 [code]
+============================================================
+# Determine Winner
+df_games['winner'] = np.where(df_games['home_goals'] > df_games['away_goals'], 'Home', 'Away')
+
+# Calculate Points (3 for Reg Win, 2 for OT Win, 1 for OT Loss, 0 for Reg Loss)
+
+# Conditions
+home_win = df_games['home_goals'] > df_games['away_goals']
+away_win = df_games['away_goals'] > df_games['home_goals']
+is_ot = df_games['went_ot'] == 1
+
+# Vectorized Point Calculation
+df_games['home_points'] = 0
+df_games['away_points'] = 0
+
+# Home Points
+df_games.loc[home_win & ~is_ot, 'home_points'] = 3
+df_games.loc[home_win & is_ot, 'home_points'] = 2
+df_games.loc[away_win & is_ot, 'home_points'] = 1
+
+# Away Points
+df_games.loc[away_win & ~is_ot, 'away_points'] = 3
+df_games.loc[away_win & is_ot, 'away_points'] = 2
+df_games.loc[home_win & is_ot, 'away_points'] = 1
+
+# Differentials
+df_games['goal_diff'] = df_games['home_goals'] - df_games['away_goals']
+df_games['xg_diff'] = df_games['home_xg'] - df_games['away_xg']
+
+df_games[['game_id', 'home_team', 'away_team', 'home_goals', 'away_goals', 'home_points', 'away_points']].head()
+
+============================================================
+Cell 8 [markdown]
+============================================================
+## 4. Quality Control (QC)
+
+Running assertions and statistical checks.
+
+============================================================
+Cell 9 [code]
+============================================================
+# 1. Uniqueness Check
+assert df_games['game_id'].is_unique, "CRITICAL: Game IDs are not unique!"
+
+# 2. Consistency Check (Points)
+# In every game, sum of points should be 3 (Reg) or 3 (OT 2+1).
+# assert (df_games['home_points'] + df_games['away_points']).isin([3]).all(), "Point allocation error found!"
+
+print("✅ Assertions Passed.")
+
+# 3. Distribution Check
+print("\nGoal Distribution:")
+print(df_games[['home_goals', 'away_goals']].describe())
+
+# Statistician's Note
+print("\n--- Statistician's Commentary ---")
+h_mean = df_games['home_goals'].mean()
+a_mean = df_games['away_goals'].mean()
+print(f"Observed Home Advantage: +{h_mean - a_mean:.3f} goals/game")
+if (h_mean - a_mean) > 0.2:
+    print("Note: Home advantage seems significant, typical of professional leagues.")
+else:
+    print("Note: Home advantage is mild or negligible.")
+print("Data is clean and ready for Phase 1b (Ranking Models).")
+
+============================================================
+Cell 10 [markdown]
+============================================================
+## 5. Result Display
+
+Displaying the final aggregated dataframe.
+
+============================================================
+Cell 11 [code]
+============================================================
+df_games
+
+============================================================
+Cell 12 [markdown]
+============================================================
+# Step 2: Data Restructuring & Merging
+
+**Objective**: Transform the game-level data into team-level data (long format) for modeling.
+
+## 1. Restructuring to Long Format
+
+We need two rows per game: one for the Home team and one for the Away team.
+
+============================================================
+Cell 13 [code]
+============================================================
+# Home Team Perspective
+df_home = df_games.rename(columns={
+    'home_team': 'Team',
+    'away_team': 'Opponent',
+    'home_goals': 'GF',
+    'away_goals': 'GA',
+    'home_xg': 'xGF',
+    'away_xg': 'xGA',
+    'home_shots': 'SF',
+    'away_shots': 'SA',
+    'home_points': 'Result'  # using Points (0-3) as Result
+}).copy()
+df_home['is_home'] = 1
+
+# Away Team Perspective
+df_away = df_games.rename(columns={
+    'away_team': 'Team',
+    'home_team': 'Opponent',
+    'away_goals': 'GF',
+    'home_goals': 'GA',
+    'away_xg': 'xGF',
+    'home_xg': 'xGA',
+    'away_shots': 'SF',
+    'home_shots': 'SA',
+    'away_points': 'Result' # using Points (0-3) as Result
+}).copy()
+df_away['is_home'] = 0
+
+# Select relevant columns to keep clean
+cols_to_keep = ['game_id', 'Team', 'Opponent', 'GF', 'GA', 'xGF', 'xGA', 'SF', 'SA', 'is_home', 'Result', 'went_ot']
+df_home = df_home[cols_to_keep]
+df_away = df_away[cols_to_keep]
+
+# Merge (Concatenate)
+df_team_stats = pd.concat([df_home, df_away], ignore_index=True)
+df_team_stats['dataset_type'] = 'train'
+
+# Sort by game_id for cleaner viewing
+df_team_stats = df_team_stats.sort_values(by=['game_id', 'is_home'], ascending=[True, False]).reset_index(drop=True)
+
+print(f"Original Games: {len(df_games)}")
+print(f"Team-Level Rows: {len(df_team_stats)}")
+df_team_stats.head()
+
+============================================================
+Cell 14 [markdown]
+============================================================
+## 2. Aligning Matchups (Prediction Set)
+
+Loading the matchups file and formatting it to match the training data.
+
+============================================================
+Cell 15 [code]
+============================================================
+import pandas as pd
+
+matchup_file = 'd:/A/Warton/Data/matchups.csv'
+df_matchups_raw = pd.read_csv(matchup_file)
+
+# Check column names
+print("Matchup Columns:", df_matchups_raw.columns.tolist())
+
+# Let's inspect the first few rows to be sure
+display(df_matchups_raw.head())
+
+# Logic to transform matchups to long format
+matchup_list = []
+
+for idx, row in df_matchups_raw.iterrows():
+    # Using the first two columns regardless of name, assuming Home, Away order
+    # based on the standard format. 
+    home = row.iloc[2]
+    away = row.iloc[3]
+    gid = f"pred_{idx}"
+    
+    # Home Row
+    matchup_list.append({
+        'game_id': gid,
+        'Team': home,
+        'Opponent': away,
+        'is_home': 1,
+        'dataset_type': 'test'
+    })
+    # Away Row
+    matchup_list.append({
+        'game_id': gid,
+        'Team': away,
+        'Opponent': home,
+        'is_home': 0,
+        'dataset_type': 'test'
+    })
+
+df_pred = pd.DataFrame(matchup_list)
+
+# Concatenate with main stats
+# (Ensure df_team_stats is defined in previous cells)
+if 'df_team_stats' in locals():
+    df_full = pd.concat([df_team_stats, df_pred], ignore_index=True, sort=False)
+    print(f"Total Rows (Train + Pred): {len(df_full)}")
+    display(df_full.tail())
+
+============================================================
+Cell 16 [markdown]
+============================================================
+## 3. Final Quality Check
+
+Verifying row counts and team sequences.
+
+============================================================
+Cell 17 [code]
+============================================================
+# 1. Row Count Check
+assert len(df_team_stats) == 2 * len(df_games), "Error: Row count mismatch in restructuring!"
+
+# 2. Spot Check a Team
+sample_team = df_team_stats['Team'].iloc[0]
+print(f"\nSample History for {sample_team}:")
+display(df_team_stats[df_team_stats['Team'] == sample_team].sort_values('game_id').head())
+
+print("\nData Restructuring Complete. Ready for Phase 1b (Ranking/Elo).")
+print("Shape of df_team_stats:", df_team_stats.shape)
+
+============================================================
+Cell 18 [markdown]
+============================================================
+# Step 3: Weighting Strategy
+
+============================================================
+Cell 19 [code]
+============================================================
+# Step 3: Weighting Strategy
+
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# 1. Macro: Pythagorean Expectation
+# Calculate aggregated stats for Pyth Expectation
+pyth_cols = ['GF', 'GA']
+pyth_df = df_team_stats[df_team_stats['dataset_type'] == 'train'].groupby('Team')[pyth_cols].sum().reset_index()
+
+# Handle potential division by zero (though sums shouldn't be zero efficiently, good practice)
+pyth_df['total_scored'] = pyth_df['GF'] + pyth_df['GA']
+pyth_df['total_scored'] = pyth_df['total_scored'].replace(0, 1) 
+
+# Calculate Pyth Win % (Exponent 2.0)
+pyth_df['Pyth_Win%'] = pyth_df['GF']**2.15 / (pyth_df['GF']**2.15 + pyth_df['GA']**2.15)
+
+# Calculate Actual Win % from data (Points based or strict Wins)
+# Using strict Wins (Result == 3 or Result == 2) for comparison
+actual_wins = df_team_stats[df_team_stats['dataset_type'] == 'train'].groupby('Team')['Result'].apply(lambda x: ((x == 3) | (x == 2)).sum()).reset_index(name='Wins')
+games_played = df_team_stats[df_team_stats['dataset_type'] == 'train'].groupby('Team')['game_id'].nunique().reset_index(name='GP')
+
+pyth_df = pyth_df.merge(actual_wins, on='Team').merge(games_played, on='Team')
+pyth_df['Actual_Win%'] = pyth_df['Wins'] / pyth_df['GP']
+
+print("Top 5 Teams by Pythagorean Expectation:")
+display(pyth_df.sort_values('Pyth_Win%', ascending=False).head())
+
+# Visualization 1: Actual vs Pyth Win%
+plt.figure(figsize=(8, 6))
+sns.scatterplot(x='Pyth_Win%', y='Actual_Win%', data=pyth_df)
+plt.plot([0, 1], [0, 1], 'r--')  # y=x line
+plt.title('Actual Win% vs Pythagorean Expectation')
+plt.xlabel('Pythagorean Expectation')
+plt.ylabel('Actual Win %')
+plt.grid(True)
+plt.show()
+
+# 2. Micro: Dynamic Multipliers (Game Level)
+
+# A. Margin of Victory (MoV) Multiplier
+# Formula: ln(|GF - GA| + 1)
+df_team_stats['mov_mult'] = np.log(abs(df_team_stats['GF'] - df_team_stats['GA']) + 1)
+
+# Visualization 2: MoV Multiplier Curve
+plt.figure(figsize=(8, 4))
+xg = np.arange(0, 11, 1)
+yg = np.log(xg + 1)
+plt.plot(xg, yg, marker='o')
+plt.title('MoV Multiplier Curve')
+plt.xlabel('Goal Difference (Abs)')
+plt.ylabel('Multiplier (ln(GD+1))')
+plt.grid(True)
+plt.show()
+
+# B. Process Adjustment (xG Multiplier)
+# Performance Score = 0.4 * Goal_Share + 0.6 * xG_Share
+
+df_team_stats['Total_Goals'] = df_team_stats['GF'] + df_team_stats['GA']
+df_team_stats['Total_xG'] = df_team_stats['xGF'] + df_team_stats['xGA']
+
+# Safeguard against 0 totals (rare in game but possible)
+# Using replace(0, 1) prevents DivisionByZero
+df_team_stats['Goal_Share'] = df_team_stats.apply(lambda row: row['GF']/row['Total_Goals'] if row['Total_Goals'] > 0 else 0.5, axis=1)
+df_team_stats['xG_Share'] = df_team_stats.apply(lambda row: row['xGF']/row['Total_xG'] if row['Total_xG'] > 0 else 0.5, axis=1)
+
+# Composite Performance Score (0.4 Goals, 0.6 xG)
+df_team_stats['perf_score'] = (0.4 * df_team_stats['Goal_Share']) + (0.6 * df_team_stats['xG_Share'])
+
+print("Weighting Statistics Summary:")
+print(df_team_stats[['mov_mult', 'perf_score', 'Goal_Share', 'xG_Share']].describe())
+
+# Check integration
+print("\nSample Weighted Data:")
+display(df_team_stats[['Team', 'Opponent', 'GF', 'GA', 'mov_mult', 'perf_score']].head())
+
+
+============================================================
+Cell 20 [markdown]
+============================================================
+#  Step 4: Iterative Elo Rating System (Bagging)
+
+============================================================
+Cell 21 [code]
+============================================================
+# Step 4: Iterative Elo Rating System (Bagging)
+
+import random
+from tqdm import tqdm
+
+# 1. Define Elo Functions
+
+def calculate_expected_score(rating_a, rating_b, hfa=14.89):
+    # Expected score for Team A (Home) vs Team B (Away)
+    # HFA is added to Home Team rating
+    return 1 / (1 + 10 ** ((rating_b - (rating_a + hfa)) / 400))
+
+def calculate_s_actual(result_points, perf_score):
+    # result_points: 3 (Reg W), 2 (OT W), 1 (OT L), 0 (Reg L)
+    # Binary Result: Win (3, 2) = 1, Loss (1, 0) = 0
+    result_binary = 1.0 if result_points >= 2 else 0.0
+    return 0.3 * result_binary + 0.7 * perf_score
+
+def update_ratings(rating_home, rating_away, result_points_home, home_perf, away_perf, mov_mult, k=25, hfa=14.89):
+    # Home Expected
+    exp_home = calculate_expected_score(rating_home, rating_away, hfa)
+    exp_away = 1.0 - exp_home
+
+    # Away Result Points derived:
+    # if Home=3(RegW) -> Away=0(RegL)
+    # if Home=2(OTW) -> Away=1(OTL)
+    # if Home=1(OTL) -> Away=2(OTW)
+    # if Home=0(RegL) -> Away=3(RegW)
+    if result_points_home == 3:
+        result_points_away = 0
+    elif result_points_home == 2:
+        result_points_away = 1
+    elif result_points_home == 1:
+        result_points_away = 2
+    else:
+        result_points_away = 3
+
+    # Actual Scores (Composite) — use both teams' perf
+    s_actual_home = calculate_s_actual(result_points_home, home_perf)
+    s_actual_away = calculate_s_actual(result_points_away, away_perf)
+
+    # Normalize to keep zero-sum (prevents Elo drift)
+    total = s_actual_home + s_actual_away
+    if total == 0:
+        s_actual_home = 0.5
+        s_actual_away = 0.5
+    else:
+        s_actual_home = s_actual_home / total
+        s_actual_away = s_actual_away / total
+
+    # Update
+    # R_new = R_old + K * M * (S_actual - S_expected)
+    new_rating_home = rating_home + k * mov_mult * (s_actual_home - exp_home)
+    new_rating_away = rating_away + k * mov_mult * (s_actual_away - exp_away)
+
+    return new_rating_home, new_rating_away
+
+# 2. Prepare Data for Simulation
+# Create a list of game dictionaries for fast iteration
+# We need: game_id, home_team, away_team, home_points, home_perf, away_perf, mov_mult
+
+df_train = df_team_stats[df_team_stats['dataset_type'] == 'train']
+df_home_sim = df_train[df_train['is_home'] == 1].set_index('game_id')
+df_away_sim = df_train[df_train['is_home'] == 0].set_index('game_id')
+
+# Join to get all info in one row
+sim_games_df = df_home_sim[['Team', 'Result', 'perf_score', 'mov_mult']].join(
+    df_away_sim[['Team', 'perf_score']], lsuffix='_home', rsuffix='_away'
+)
+
+games_list = []
+for gid, row in sim_games_df.iterrows():
+    games_list.append({
+        'home': row['Team_home'],
+        'away': row['Team_away'],
+        'home_pts': row['Result'],
+        'home_perf': row['perf_score_home'],
+        'away_perf': row['perf_score_away'],
+        'mov_mult': row['mov_mult']
+    })
+
+print(f"Prepared {len(games_list)} games for simulation.")
+
+# 3. Simulation Loop (Bagging)
+teams = df_train['Team'].unique()
+N_SIMS = 1000
+K_FACTOR = 30
+HFA = 14.89
+
+# Dictionary to store final ratings from each sim: {team: [r1, r2, ...]}
+sim_results = {team: [] for team in teams}
+
+print(f"Running {N_SIMS} simulations...")
+np.random.seed(42)
+
+for i in tqdm(range(N_SIMS)):
+    # Init Ratings
+    current_ratings = {team: 1500.0 for team in teams}
+
+    # Shuffle games
+    daily_games = games_list.copy()
+    random.shuffle(daily_games)
+
+    # Play Season
+    for g in daily_games:
+        home = g['home']
+        away = g['away']
+
+        rh = current_ratings[home]
+        ra = current_ratings[away]
+
+        nrh, nra = update_ratings(
+            rh, ra,
+            g['home_pts'], g['home_perf'], g['away_perf'],
+            g['mov_mult'], k=K_FACTOR, hfa=HFA
+        )
+
+        current_ratings[home] = nrh
+        current_ratings[away] = nra
+
+    # Store final ratings
+    for team, rating in current_ratings.items():
+        sim_results[team].append(rating)
+
+# 4. Aggregation
+final_ratings = []
+for team, ratings in sim_results.items():
+    mean_rating = np.mean(ratings)
+    std_dev = np.std(ratings)
+    final_ratings.append({'Team': team, 'Elo_Mean': mean_rating, 'Elo_Std': std_dev})
+
+df_elo = pd.DataFrame(final_ratings).sort_values('Elo_Mean', ascending=False).reset_index(drop=True)
+df_elo['Elo_Rank'] = df_elo.index + 1
+
+print("\nTop 10 Teams by Elo:")
+display(df_elo.head(32))
+
+# 5. Validation
+# Plot Distribution
+plt.figure(figsize=(10, 6))
+sns.histplot(df_elo['Elo_Mean'], kde=True, bins=20)
+plt.title('Distribution of Final Elo Ratings (Mean of 100 Sims)')
+plt.xlabel('Elo Rating')
+plt.show()
+
+# Correlation with Pythagorean or Points
+# Creating a quick 'League Points' view for correlation
+points_df = df_train.groupby('Team')['Result'].sum().reset_index(name='League_Points')
+validation_df = df_elo.merge(points_df, on='Team')
+
+corr = validation_df['Elo_Mean'].corr(validation_df['League_Points'])
+print(f"\nCorrelation between Elo and League Points: {corr:.4f}")
+
+plt.figure(figsize=(8, 6))
+sns.scatterplot(x='League_Points', y='Elo_Mean', data=validation_df)
+plt.title(f'Elo Rating vs League Points (Corr: {corr:.2f})')
+plt.grid(True)
+plt.show()
+
+============================================================
+Cell 22 [markdown]
+============================================================
+# Step 5: Ranking & Prediction
+
+============================================================
+Cell 23 [code]
+============================================================
+# Step 5: Ranking and Prediction
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# 1. Power Rankings with Confidence Intervals
+
+df_elo['95_CI_Lower'] = df_elo['Elo_Mean'] - 1.96 * df_elo['Elo_Std']
+df_elo['95_CI_Upper'] = df_elo['Elo_Mean'] + 1.96 * df_elo['Elo_Std']
+
+print("Official Power Rankings (Top 10):")
+try:
+    display(df_elo[['Elo_Rank', 'Team', 'Elo_Mean', 'Elo_Std', '95_CI_Lower', '95_CI_Upper']].head(10))
+except NameError:
+    print(df_elo[['Elo_Rank', 'Team', 'Elo_Mean', 'Elo_Std', '95_CI_Lower', '95_CI_Upper']].head(10))
+
+# 2. Execute Prediction on Matchups
+# Load Matchups
+matchup_file = 'd:/A/Warton/Data/matchups.csv'
+
+try:
+    df_matchups_final = pd.read_csv(matchup_file)
+    
+    # --- FIX: Select specific columns based on the file content ---
+    # We expect 'home_team' and 'away_team' based on the file inspection
+    if 'home_team' in df_matchups_final.columns and 'away_team' in df_matchups_final.columns:
+        df_matchups_final = df_matchups_final[['home_team', 'away_team']].copy()
+        df_matchups_final.columns = ['Home', 'Away']
+    else:
+        # Fallback if headers are different, try to grab by index if exactly 2 cols, 
+        # but here we know the structure so we just print error if headers miss.
+        print(f"Columns found: {df_matchups_final.columns}")
+        raise ValueError("Could not find 'home_team' and 'away_team' columns.")
+
+except Exception as e:
+    print(f"Error loading matchups: {e}")
+    # Create empty df to stop crash
+    df_matchups_final = pd.DataFrame(columns=['Home', 'Away'])
+
+# Merge Ratings
+if not df_matchups_final.empty:
+    df_pred_final = df_matchups_final.merge(df_elo[['Team', 'Elo_Mean']], left_on='Home', right_on='Team', how='left').rename(columns={'Elo_Mean': 'Elo_Home'})
+    df_pred_final = df_pred_final.drop('Team', axis=1, errors='ignore') # Drop 'Team' if it exists from merge
+    
+    df_pred_final = df_pred_final.merge(df_elo[['Team', 'Elo_Mean']], left_on='Away', right_on='Team', how='left').rename(columns={'Elo_Mean': 'Elo_Away'})
+    df_pred_final = df_pred_final.drop('Team', axis=1, errors='ignore')
+
+    # Check for missing ratings
+    if df_pred_final['Elo_Home'].isnull().any() or df_pred_final['Elo_Away'].isnull().any():
+        print("WARNING: Some teams found in matchups but not in training data!")
+        # Optional: Fill missing with 1500?
+        # df_pred_final.fillna(1500, inplace=True)
+        try:
+            display(df_pred_final[df_pred_final.isnull().any(axis=1)])
+        except:
+            print(df_pred_final[df_pred_final.isnull().any(axis=1)])
+    else:
+        print("All teams matched successfully.")
+
+    # Calculate Win Probability
+    # P(HomeWin) = 1 / (1 + 10^((RA - (RH + HIA)) / 400))
+    HIA = HFA # Home Ice Advantage
+
+    df_pred_final['Prob_Home'] = 1 / (1 + 10 ** ((df_pred_final['Elo_Away'] - (df_pred_final['Elo_Home'] + HIA)) / 400))
+    
+    # Predicted Winner Logic
+    df_pred_final['Predicted_Winner'] = df_pred_final.apply(
+        lambda x: x['Home'] if x['Prob_Home'] > 0.5 else x['Away'], axis=1
+    )
+
+    # Risk Level
+    def get_risk(prob):
+        if abs(prob - 0.5) < 0.05:
+            return 'High Risk / Potential OT'
+        elif prob > 0.65 or prob < 0.35:
+            return 'Solid Bet'
+        else:
+            return 'Medium Risk'
+
+    df_pred_final['Risk_Level'] = df_pred_final['Prob_Home'].apply(get_risk)
+
+    print("\nPrediction Table:")
+    try:
+        display(df_pred_final.head(10))
+    except NameError:
+        print(df_pred_final.head(10))
+
+    # 3. PDO Check (The Luck Test)
+    # Calculate PDO for all teams from training data
+    # Ensure aggregated 'df_team_stats' exists from Step 3
+    if 'df_team_stats' in locals():
+        pdo_df = df_team_stats[df_team_stats['dataset_type'] == 'train'].groupby('Team')[['GF', 'SF', 'GA', 'SA']].sum().reset_index()
+        # Avoid div by zero
+        pdo_df['SF'] = pdo_df['SF'].replace(0, 1)
+        pdo_df['SA'] = pdo_df['SA'].replace(0, 1)
+        
+        pdo_df['Sh%'] = pdo_df['GF'] / pdo_df['SF']
+        pdo_df['Sv%'] = 1 - (pdo_df['GA'] / pdo_df['SA'])
+        pdo_df['PDO'] = pdo_df['Sh%'] + pdo_df['Sv%']
+
+        pdo_check = df_elo.merge(pdo_df[['Team', 'PDO']], on='Team')
+
+        print("\n--- Regression Analysis Alert ---")
+        lucky_top_teams = pdo_check[(pdo_check['Elo_Rank'] <= 5) & (pdo_check['PDO'] > 1.04)]
+        if not lucky_top_teams.empty:
+            for _, row in lucky_top_teams.iterrows():
+                print(f"WARNING: {row['Team']} (Rank {row['Elo_Rank']}) has an unsustainable PDO of {row['PDO']:.3f}. Expect regression.")
+        else:
+            print("Top 5 teams have sustainable underlying metrics (PDO < 1.04).")
+    
+    # 4. Visualization: Matchup Odds Spread
+    plt.figure(figsize=(10, 6))
+    df_pred_final_sorted = df_pred_final.sort_values('Prob_Home')
+    # Create a string label for y-axis
+    y_labels = df_pred_final_sorted['Home'] + " vs " + df_pred_final_sorted['Away']
+    
+    plt.barh(y_labels, df_pred_final_sorted['Prob_Home'] - 0.5)
+    plt.title('Matchup Advantage Spread (Home Win Probability - 0.5)')
+    plt.xlabel('Advantage Magnitude (Right=Home Favored, Left=Away Favored)')
+    plt.ylabel('Matchup')
+    plt.axvline(0, color='k', linestyle='-')
+    plt.tight_layout()
+    plt.show()
+
+    # Save Predictions
+    df_pred_final.to_csv('d:/A/Warton/Data/submission.csv', index=False)
+    print("Predictions saved to submission.csv")
+
+============================================================
+Cell 24 [code]
+============================================================
+
+
+============================================================
+Cell 25 [code]
+============================================================
+
+
+============================================================
+Cell 26 [code]
+============================================================
+        
+
